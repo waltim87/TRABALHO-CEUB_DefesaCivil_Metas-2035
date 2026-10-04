@@ -28,9 +28,11 @@ As chaves são opcionais para abrir o dashboard: sem credenciais, o app mantém 
 ## Monitoramento meteorológico e ocorrências
 
 - O painel consulta condições atuais e previsão de chuva, probabilidade de precipitação e rajadas do [Open-Meteo](https://open-meteo.com/en/docs), com cache de 15 minutos.
+- Enquanto a página estiver aberta, o dashboard se atualiza automaticamente a cada 5 minutos; o clima usa cache de 15 minutos e o RSS cache de 5 minutos.
 - O histórico meteorológico usa reanálise estimada do [Open-Meteo Historical Weather API](https://open-meteo.com/en/docs/historical-weather-api), que pode ter alguns dias de atraso e não confirma que ocorreu um alagamento.
 - Os limiares de chuva e rajada são configuráveis na lateral e servem como triagem preventiva; os níveis exibidos não são alertas oficiais.
 - Ocorrências inseridas no formulário ficam na sessão atual. Exporte o CSV para preservar os registros e importe-o novamente quando necessário.
 - O RSS público do [DF Agora](https://www.dfagora.com.br/feed/) é consultado com cache de 5 minutos; o painel exibe manchetes e resumos filtrados, sempre com link para a matéria original.
 - A classificação das notícias é apenas triagem automática. Confirme qualquer relato antes de tratá-lo como ocorrência real ou emitir aviso à população.
+- Configure `GOOGLE_MAPS_API_KEY` em Streamlit Community Cloud → Settings → Secrets; restrinja a chave no Google Cloud ao domínio do app e à Maps JavaScript API. Como a API JavaScript roda no navegador, a chave continua visível para visitantes e precisa dessas restrições.
 - O painel de [trânsito ao vivo do DF Agora](https://www.dfagora.com.br/transito-df-ao-vivo/) também fica disponível como fonte externa para consulta.

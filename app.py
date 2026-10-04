@@ -12,6 +12,7 @@ import pydeck as pdk
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from google import genai
@@ -19,8 +20,10 @@ from html.parser import HTMLParser
 
 # Configuração da página
 st.set_page_config(page_title="Centro de Monitoramento - Defesa Civil", layout="wide")
+st_autorefresh(interval=5 * 60 * 1000, key="atualizacao_automatica")
 st.title("🚨 Centro de Monitoramento de Risco - Defesa Civil")
 st.write("Monitoramento em tempo real via redes sociais e IA")
+st.caption(f"Painel atualizado em {datetime.now(ZoneInfo('America/Sao_Paulo')).strftime('%d/%m/%Y %H:%M')} (horário de Brasília)")
 
 # --- Dados de apoio para geolocalização ---
 REGIOES_DF = [
@@ -449,10 +452,7 @@ with st.sidebar:
         if x_bearer:
                 st.session_state["x_bearer"] = x_bearer
 
-        maps_api_key = st.text_input(
-            "Google Maps API Key", type="password", value=obter_segredo("GOOGLE_MAPS_API_KEY"),
-            help="Chave separada com Maps JavaScript API habilitada",
-        )
+        maps_api_key = obter_segredo("GOOGLE_MAPS_API_KEY")
         query = st.text_input("Busca do monitoramento", value=montar_query_df())
         municipio = st.selectbox("Localidade", ["Todas"] + sorted({item["nome"] for item in LOCAL_CIDADES.values()}))
         risco_filtro = st.selectbox("Gravidade", ["Todos", "ALTO", "MÉDIO", "BAIXO"])
@@ -673,7 +673,7 @@ if st.session_state["posts"]:
                     map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
                     tooltip=dica,
                 ), use_container_width=True)
-                st.caption("Mapa Google: informe uma chave com Maps JavaScript API habilitada na lateral.")
+                st.caption("Para ativar o Google Maps, configure GOOGLE_MAPS_API_KEY nos segredos do app.")
         else:
             st.info("Ainda não há coordenadas válidas para exibir no mapa.")
 
