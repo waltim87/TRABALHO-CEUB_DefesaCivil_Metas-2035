@@ -1,9 +1,11 @@
 import json
+import hashlib
 import html
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pydeck as pdk
@@ -77,6 +79,89 @@ def obter_segredo(nome: str):
         return st.secrets.get(nome, os.getenv(nome, ""))
     except Exception:
         return os.getenv(nome, "")
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def buscar_previsao_clima(pontos):
+    parametros = {
+        "latitude": ",".join(str(ponto[1]) for ponto in pontos),
+        "longitude": ",".join(str(ponto[2]) for ponto in pontos),
+        "current": "temperature_2m,relative_humidity_2m,precipitation,weather_code,wind_speed_10m,wind_gusts_10m",
+        "hourly": "precipitation_probability,precipitation,wind_gusts_10m",
+        "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,wind_gusts_10m_max",
+        "forecast_days": 7,
+        "timezone": "America/Sao_Paulo",
+    }
+    resposta = requests.get("https://api.open-meteo.com/v1/forecast", params=parametros, timeout=25)
+    resposta.raise_for_status()
+    dados = resposta.json()
+    return dados if isinstance(dados, list) else [dados]
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def buscar_historico_clima(pontos, inicio, fim):
+    parametros = {
+        "latitude": ",".join(str(ponto[1]) for ponto in pontos),
+        "longitude": ",".join(str(ponto[2]) for ponto in pontos),
+        "start_date": inicio,
+        "end_date": fim,
+        "daily": "precipitation_sum,wind_gusts_10m_max",
+        "timezone": "America/Sao_Paulo",
+    }
+    resposta = requests.get("https://archive-api.open-meteo.com/v1/archive", params=parametros, timeout=30)
+    resposta.raise_for_status()
+    dados = resposta.json()
+    return dados if isinstance(dados, list) else [dados]
+
+
+def descricao_tempo(codigo):
+    descricoes = {
+        0: "Céu limpo", 1: "Predomínio de céu limpo", 2: "Parcialmente nublado", 3: "Encoberto",
+        45: "Neblina", 48: "Neblina com geada", 51: "Garoa leve", 53: "Garoa moderada",
+        55: "Garoa intensa", 61: "Chuva leve", 63: "Chuva moderada", 65: "Chuva forte",
+        80: "Pancadas leves", 81: "Pancadas moderadas", 82: "Pancadas fortes",
+        95: "Tempestade", 96: "Tempestade com granizo", 99: "Tempestade forte com granizo",
+    }
+    return descricoes.get(codigo, f"Código meteorológico {codigo}")
+
+
+def resumir_previsao_clima(previsao, local, chuva_limite, vento_limite):
+    agora = datetime.now(ZoneInfo("America/Sao_Paulo"))
+    horaria = previsao.get("hourly", {})
+    horas_futuras = [
+        indice for indice, instante in enumerate(horaria.get("time", []))
+        if datetime.fromisoformat(instante).replace(tzinfo=agora.tzinfo) >= agora
+    ][:24]
+    chuva_horaria = horaria.get("precipitation", [])
+    probabilidade_horaria = horaria.get("precipitation_probability", [])
+    rajadas_horarias = horaria.get("wind_gusts_10m", [])
+    chuva_24h = sum((chuva_horaria[i] or 0) for i in horas_futuras if i < len(chuva_horaria))
+    prob_chuva = max((probabilidade_horaria[i] or 0) for i in horas_futuras if i < len(probabilidade_horaria)) if horas_futuras else 0
+    rajada_prevista = max((rajadas_horarias[i] or 0) for i in horas_futuras if i < len(rajadas_horarias)) if horas_futuras else 0
+    atual = previsao.get("current", {})
+    codigo = int(atual.get("weather_code", 0) or 0)
+    tempestade = codigo in {95, 96, 97, 99}
+
+    if tempestade or chuva_24h >= chuva_limite * 1.7 or rajada_prevista >= vento_limite * 1.4:
+        risco, icone = "ALTO", "🔴"
+    elif chuva_24h >= chuva_limite or rajada_prevista >= vento_limite or (prob_chuva >= 70 and chuva_24h >= 5):
+        risco, icone = "MÉDIO", "🟡"
+    else:
+        risco, icone = "BAIXO", "🟢"
+
+    return {
+        "Localidade": local[0], "lat": local[1], "lon": local[2],
+        "risco": risco, "icone": icone,
+        "Temperatura (°C)": atual.get("temperature_2m"),
+        "Umidade (%)": atual.get("relative_humidity_2m"),
+        "Chuva atual (mm)": atual.get("precipitation"),
+        "Vento atual (km/h)": atual.get("wind_speed_10m"),
+        "Rajada atual (km/h)": atual.get("wind_gusts_10m"),
+        "Chuva 24h prevista (mm)": round(chuva_24h, 1),
+        "Prob. chuva 24h (%)": prob_chuva,
+        "Rajada máx. prevista (km/h)": round(rajada_prevista, 1),
+        "Condição": descricao_tempo(codigo),
+    }
 
 
 def extrair_local(texto: str):
@@ -291,7 +376,117 @@ with st.sidebar:
         query = st.text_input("Busca do monitoramento", value=montar_query_df())
         municipio = st.selectbox("Localidade", ["Todas"] + sorted({item["nome"] for item in LOCAL_CIDADES.values()}))
         risco_filtro = st.selectbox("Gravidade", ["Todos", "ALTO", "MÉDIO", "BAIXO"])
+        chuva_limite = st.number_input("Atenção a chuva em 24h (mm)", min_value=1.0, max_value=200.0, value=30.0, step=5.0)
+        vento_limite = st.number_input("Atenção a rajadas (km/h)", min_value=10.0, max_value=150.0, value=60.0, step=5.0)
+        local_clima = st.selectbox("Localidade para previsão detalhada", sorted({item["nome"] for item in LOCAL_CIDADES.values()}))
         pesquisa = st.button("Buscar agora")
+
+
+# --- Painel meteorológico ---
+st.header("Clima e alertas preventivos")
+st.caption("Previsões indicativas; não são alertas oficiais nem substituem INMET, Defesa Civil ou CBMDF.")
+pontos_clima = tuple((item["nome"], item["lat"], item["lon"]) for item in LOCAL_CIDADES.values())
+if st.button("Atualizar clima"):
+    buscar_previsao_clima.clear()
+
+try:
+    previsoes_clima = buscar_previsao_clima(pontos_clima)
+    if len(previsoes_clima) != len(pontos_clima):
+        raise ValueError("A fonte retornou uma quantidade inesperada de localidades.")
+    resumos_clima = [
+        resumir_previsao_clima(previsao, ponto, chuva_limite, vento_limite)
+        for previsao, ponto in zip(previsoes_clima, pontos_clima)
+    ]
+    clima_df = pd.DataFrame(resumos_clima)
+    alto_clima = int((clima_df["risco"] == "ALTO").sum())
+    medio_clima = int((clima_df["risco"] == "MÉDIO").sum())
+    col_clima_1, col_clima_2, col_clima_3 = st.columns(3)
+    col_clima_1.metric("Alertas altos", alto_clima)
+    col_clima_2.metric("Atenção", medio_clima)
+    col_clima_3.metric("Localidades monitoradas", len(clima_df))
+    st.caption("Fonte: Open-Meteo · dados em lote · cache de 15 minutos")
+
+    mapa_clima = clima_df.copy()
+    mapa_clima["cor"] = mapa_clima["risco"].map({
+        "ALTO": [214, 75, 66], "MÉDIO": [223, 155, 43], "BAIXO": [39, 134, 107]
+    })
+    mapa_clima["local"] = mapa_clima["Localidade"]
+    mapa_clima["chuva"] = mapa_clima["Chuva 24h prevista (mm)"]
+    mapa_clima["rajada"] = mapa_clima["Rajada máx. prevista (km/h)"]
+    camada_clima = pdk.Layer(
+        "ScatterplotLayer", data=mapa_clima, get_position="[lon, lat]",
+        get_fill_color="cor", get_radius=1500, radius_min_pixels=6,
+        radius_max_pixels=18, pickable=True,
+    )
+    vista_clima = pdk.ViewState(latitude=-15.82, longitude=-47.93, zoom=7.5, pitch=0)
+    st.pydeck_chart(pdk.Deck(
+        layers=[camada_clima], initial_view_state=vista_clima,
+        map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+        tooltip={"html": "<b>{local}</b><br/>Risco: {risco}<br/>Chuva 24h: {chuva} mm<br/>Rajadas: {rajada} km/h"},
+    ), use_container_width=True)
+    st.dataframe(clima_df.drop(columns=["lat", "lon", "icone"]), hide_index=True, use_container_width=True)
+
+    indice_local = next(i for i, ponto in enumerate(pontos_clima) if ponto[0] == local_clima)
+    previsao_local = previsoes_clima[indice_local]
+    serie_horaria = previsao_local.get("hourly", {})
+    agora = datetime.now(ZoneInfo("America/Sao_Paulo")).replace(minute=0, second=0, microsecond=0, tzinfo=None)
+    indices_24h = [
+        i for i, instante in enumerate(serie_horaria.get("time", []))
+        if datetime.fromisoformat(instante) >= agora
+    ][:24]
+    if indices_24h:
+        st.subheader(f"Previsão para {local_clima}")
+        horarios = [serie_horaria["time"][i] for i in indices_24h]
+        col_chuva, col_probabilidade, col_rajada = st.columns(3)
+        col_chuva.line_chart(pd.Series(
+            [serie_horaria["precipitation"][i] for i in indices_24h], index=horarios, name="Chuva (mm)"
+        ))
+        col_probabilidade.line_chart(pd.Series(
+            [serie_horaria["precipitation_probability"][i] for i in indices_24h], index=horarios, name="Probabilidade (%)"
+        ))
+        col_rajada.line_chart(pd.Series(
+            [serie_horaria["wind_gusts_10m"][i] for i in indices_24h], index=horarios, name="Rajada (km/h)"
+        ))
+        diario = previsao_local.get("daily", {})
+        previsao_7d = pd.DataFrame({
+            "Chuva (mm)": diario.get("precipitation_sum", []),
+            "Probabilidade máx. (%)": diario.get("precipitation_probability_max", []),
+            "Rajada máx. (km/h)": diario.get("wind_gusts_10m_max", []),
+            "Temp. máx. (°C)": diario.get("temperature_2m_max", []),
+            "Temp. mín. (°C)": diario.get("temperature_2m_min", []),
+        }, index=diario.get("time", []))
+        st.dataframe(previsao_7d, use_container_width=True)
+except Exception as erro:
+    st.warning(f"Não foi possível atualizar os dados meteorológicos agora: {erro}")
+
+with st.expander("Histórico meteorológico por localidade"):
+    st.caption("Reanálise estimada de chuva e vento, com alguns dias de atraso. Não representa um cadastro confirmado de alagamentos.")
+    dias_historico = st.selectbox(
+        "Período do histórico", [7, 30, 90], index=1,
+        format_func=lambda dias: f"Últimos {dias} dias",
+    )
+    if st.button("Carregar histórico meteorológico"):
+        data_fim = datetime.now(ZoneInfo("America/Sao_Paulo")).date() - timedelta(days=5)
+        data_inicio = data_fim - timedelta(days=dias_historico - 1)
+        with st.spinner("Consultando histórico meteorológico..."):
+            try:
+                historicos = buscar_historico_clima(pontos_clima, data_inicio.isoformat(), data_fim.isoformat())
+                linhas_historico = []
+                for ponto, historico in zip(pontos_clima, historicos):
+                    diario = historico.get("daily", {})
+                    chuvas = [valor for valor in diario.get("precipitation_sum", []) if valor is not None]
+                    rajadas = [valor for valor in diario.get("wind_gusts_10m_max", []) if valor is not None]
+                    linhas_historico.append({
+                        "Localidade": ponto[0], "Início": data_inicio.isoformat(), "Fim": data_fim.isoformat(),
+                        "Chuva acumulada (mm)": round(sum(chuvas), 1),
+                        "Maior chuva diária (mm)": round(max(chuvas, default=0), 1),
+                        "Maior rajada (km/h)": round(max(rajadas, default=0), 1),
+                    })
+                st.session_state["historico_meteorologico"] = pd.DataFrame(linhas_historico)
+            except Exception as erro:
+                st.error(f"Falha ao carregar histórico: {erro}")
+    if "historico_meteorologico" in st.session_state:
+        st.dataframe(st.session_state["historico_meteorologico"], hide_index=True, use_container_width=True)
 
 
 # --- Estado inicial ---
@@ -392,8 +587,94 @@ else:
     st.subheader("📊 Fila de monitoramento")
     st.write("Ainda não houve busca. Use os filtros da lateral para iniciar a coleta.")
 
+# --- Entrada e histórico de ocorrências ---
+st.divider()
+st.header("Registro de ocorrências")
+st.caption("Os registros ficam na sessão atual. Exporte o CSV para preservar ou importar históricos anteriores.")
+st.link_button("Abrir painel de trânsito ao vivo do DF Agora", "https://www.dfagora.com.br/transito-df-ao-vivo/")
+
+if "registros_manuais" not in st.session_state:
+    st.session_state["registros_manuais"] = []
+
+with st.form("form_ocorrencia", clear_on_submit=True):
+    coluna_data, coluna_tipo = st.columns(2)
+    data_evento = coluna_data.date_input("Data do evento", value=datetime.now(ZoneInfo("America/Sao_Paulo")).date())
+    tipo_evento = coluna_tipo.selectbox("Tipo de evento", [
+        "Alagamento", "Enchente", "Ponte comprometida", "Estrutura/edificação abalada",
+        "Deslizamento", "Rajada de vento", "Queda de árvore", "Buraco ou erosão", "Outro",
+    ])
+    coluna_local, coluna_gravidade = st.columns(2)
+    local_evento = coluna_local.selectbox(
+        "Localidade do evento", sorted({item["nome"] for item in LOCAL_CIDADES.values()}) + ["Outra / não identificada"]
+    )
+    gravidade_evento = coluna_gravidade.selectbox("Gravidade informada", ["ALTO", "MÉDIO", "BAIXO", "A avaliar"])
+    referencia_evento = st.text_input("Endereço, via ou referência")
+    descricao_evento = st.text_area("Descrição do evento", max_chars=1000)
+    coluna_fonte, coluna_status = st.columns(2)
+    fonte_evento = coluna_fonte.selectbox("Fonte do relato", ["DF Agora", "INMET", "Defesa Civil", "CBMDF", "Morador", "Outra"])
+    status_evento = coluna_status.selectbox("Verificação", ["Pendente de verificação", "Confirmado por equipe", "Não confirmado", "Encerrado"])
+    link_evento = st.text_input("Link da notícia ou evidência (opcional)")
+    coordenadas_texto = st.text_input("Coordenadas opcionais (latitude, longitude)", placeholder="-15.7939, -47.8828")
+    enviar_evento = st.form_submit_button("Registrar ocorrência")
+
+if enviar_evento:
+    if not descricao_evento.strip():
+        st.error("Informe uma descrição antes de registrar.")
+    else:
+        latitude_evento, longitude_evento = None, None
+        coordenadas_validas = True
+        precisao_coordenadas = "Não informada"
+        if coordenadas_texto.strip():
+            try:
+                latitude_evento, longitude_evento = [float(valor.strip()) for valor in coordenadas_texto.split(",", maxsplit=1)]
+                if not (-90 <= latitude_evento <= 90 and -180 <= longitude_evento <= 180):
+                    raise ValueError("Coordenadas fora dos limites válidos.")
+                precisao_coordenadas = "Informada manualmente"
+            except ValueError:
+                coordenadas_validas = False
+                st.error("Coordenadas inválidas. Use latitude, longitude; exemplo: -15.7939, -47.8828.")
+        elif local_evento != "Outra / não identificada":
+            dados_local = next(item for item in LOCAL_CIDADES.values() if item["nome"] == local_evento)
+            latitude_evento, longitude_evento = dados_local["lat"], dados_local["lon"]
+            precisao_coordenadas = "Centro aproximado da localidade"
+
+        if coordenadas_validas:
+            st.session_state["registros_manuais"].append({
+                "data": data_evento.isoformat(), "tipo": tipo_evento, "localidade": local_evento,
+                "referencia": referencia_evento.strip(), "gravidade": gravidade_evento,
+                "descricao": descricao_evento.strip(), "fonte": fonte_evento,
+                "verificacao": status_evento, "link": link_evento.strip(),
+                "latitude": latitude_evento, "longitude": longitude_evento,
+                "precisao_coordenadas": precisao_coordenadas,
+            })
+            st.success("Ocorrência registrada nesta sessão.")
+
+arquivo_importado = st.file_uploader("Importar histórico de ocorrências (CSV)", type=["csv"], key="importar_ocorrencias")
+if arquivo_importado:
+    hash_arquivo = hashlib.sha256(arquivo_importado.getvalue()).hexdigest()
+    if st.session_state.get("hash_csv_importado") != hash_arquivo:
+        try:
+            dados_importados = pd.read_csv(arquivo_importado)
+            campos_necessarios = {"data", "tipo", "localidade", "gravidade", "descricao", "fonte", "verificacao"}
+            if not campos_necessarios.issubset(dados_importados.columns):
+                st.error("O CSV não contém as colunas obrigatórias do histórico de ocorrências.")
+            else:
+                st.session_state["registros_manuais"].extend(dados_importados.to_dict("records"))
+                st.session_state["hash_csv_importado"] = hash_arquivo
+                st.success(f"Importadas {len(dados_importados)} ocorrências.")
+        except Exception as erro:
+            st.error(f"Não foi possível importar o CSV: {erro}")
+
+if st.session_state["registros_manuais"]:
+    registros_df = pd.DataFrame(st.session_state["registros_manuais"])
+    st.dataframe(registros_df, hide_index=True, use_container_width=True)
+    st.download_button(
+        "Exportar histórico CSV", data=registros_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="historico_ocorrencias_defesa_civil.csv", mime="text/csv",
+    )
+
 # --- Observações do projeto ---
 with st.expander("📌 Próxima etapa do projeto"):
-    st.write("1. Validar o acesso da API do X para coletar ocorrências reais.")
-    st.write("2. Refinar a geocodificação de ruas e bairros para posicionar cada alerta com precisão.")
-    st.write("3. Adicionar Threads, Instagram e Facebook após estabilizar a coleta inicial.")
+    st.write("1. Integrar alertas oficiais do INMET e observações hidrológicas do DF.")
+    st.write("2. Conectar o cadastro a um armazenamento persistente compartilhado.")
+    st.write("3. Refinar a geocodificação de ruas, pontes e estruturas para posicionar eventos com precisão.")
