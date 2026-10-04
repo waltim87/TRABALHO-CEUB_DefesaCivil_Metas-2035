@@ -31,4 +31,6 @@ As chaves são opcionais para abrir o dashboard: sem credenciais, o app mantém 
 - O histórico meteorológico usa reanálise estimada do [Open-Meteo Historical Weather API](https://open-meteo.com/en/docs/historical-weather-api), que pode ter alguns dias de atraso e não confirma que ocorreu um alagamento.
 - Os limiares de chuva e rajada são configuráveis na lateral e servem como triagem preventiva; os níveis exibidos não são alertas oficiais.
 - Ocorrências inseridas no formulário ficam na sessão atual. Exporte o CSV para preservar os registros e importe-o novamente quando necessário.
-- O painel de trânsito do [DF Agora](https://www.dfagora.com.br/transito-df-ao-vivo/) é uma fonte externa para consulta; as ocorrências registradas precisam de verificação independente.
+- O RSS público do [DF Agora](https://www.dfagora.com.br/feed/) é consultado com cache de 5 minutos; o painel exibe manchetes e resumos filtrados, sempre com link para a matéria original.
+- A classificação das notícias é apenas triagem automática. Confirme qualquer relato antes de tratá-lo como ocorrência real ou emitir aviso à população.
+- O painel de [trânsito ao vivo do DF Agora](https://www.dfagora.com.br/transito-df-ao-vivo/) também fica disponível como fonte externa para consulta.

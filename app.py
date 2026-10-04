@@ -12,7 +12,10 @@ import pydeck as pdk
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from google import genai
+from html.parser import HTMLParser
 
 # Configuração da página
 st.set_page_config(page_title="Centro de Monitoramento - Defesa Civil", layout="wide")
@@ -34,6 +37,17 @@ TERMOS_DE_RISCO = [
     "rio transbordando", "lago transbordando", "água subindo", "enchente",
     "alagamento", "erosão", "cratera", "calçada cede", "desbarrancamento",
     "aterro", "vale em rua", "quebra de rua", "via destruída"
+]
+
+TERMOS_NOTICIAS_RISCO = [
+    "alagamento", "enchente", "inundacao", "desabamento", "desabou", "colapso",
+    "afundamento", "deslizamento", "chuva forte", "temporal", "vendaval",
+    "rajada", "queda de arvore", "erosao", "buraco", "transbordamento",
+    "ponte caiu", "ponte desabou", "ponte cedeu", "ponte interditada",
+    "ponte comprometida", "ponte em risco", "ponte com rachadura", "viaduto caiu",
+    "viaduto desabou", "viaduto cedeu", "viaduto interditado", "viaduto comprometido",
+    "estrutura abalada", "estrutura comprometida", "risco estrutural", "rachadura estrutural",
+    "predio desabou", "predio interditado", "edificio desabou", "edificio interditado",
 ]
 
 LOCAL_CIDADES = {
@@ -79,6 +93,72 @@ def obter_segredo(nome: str):
         return st.secrets.get(nome, os.getenv(nome, ""))
     except Exception:
         return os.getenv(nome, "")
+
+
+class LeitorTextoHTML(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.partes = []
+
+    def handle_data(self, dado):
+        self.partes.append(dado)
+
+
+def limpar_resumo_html(conteudo):
+    leitor = LeitorTextoHTML()
+    leitor.feed(conteudo or "")
+    return " ".join(" ".join(leitor.partes).split())
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def buscar_noticias_dfagora():
+    resposta = requests.get("https://www.dfagora.com.br/feed/", timeout=20)
+    resposta.raise_for_status()
+    raiz = ET.fromstring(resposta.content)
+    noticias = []
+    termos_risco = [normalizar_texto(termo) for termo in TERMOS_NOTICIAS_RISCO]
+    termos_localidade = [
+        normalizar_texto(regiao) for regiao in REGIOES_DF
+        if regiao not in {"df", "mimoso"}
+    ]
+
+    for item in raiz.findall("./channel/item"):
+        titulo = limpar_resumo_html(item.findtext("title", ""))
+        resumo = limpar_resumo_html(item.findtext("description", ""))
+        link = item.findtext("link", "")
+        categorias = [limpar_resumo_html(categoria.text or "") for categoria in item.findall("category")]
+        texto_busca = normalizar_texto(f"{titulo} {resumo}")
+        e_risco = any(termo in texto_busca for termo in termos_risco)
+        e_df = any(normalizar_texto(categoria) == "distrito federal" for categoria in categorias)
+        e_df = e_df or any(regiao in texto_busca for regiao in termos_localidade)
+        if not (e_risco and e_df and link):
+            continue
+
+        data_publicacao = item.findtext("pubDate", "")
+        try:
+            data_formatada = parsedate_to_datetime(data_publicacao).astimezone(
+                ZoneInfo("America/Sao_Paulo")
+            ).strftime("%d/%m/%Y %H:%M")
+        except (TypeError, ValueError, OverflowError):
+            data_formatada = data_publicacao
+        noticias.append({
+            "titulo": titulo,
+            "resumo": resumo[:420],
+            "link": link,
+            "data": data_formatada,
+            "categoria": ", ".join(categorias),
+            "risco": classificar_risco_noticia(f"{titulo} {resumo}"),
+        })
+    return noticias
+
+
+def classificar_risco_noticia(texto):
+    texto_normalizado = normalizar_texto(texto)
+    if any(termo in texto_normalizado for termo in ["desabamento", "desabou", "colapso", "soterrado", "morte", "mortos", "feridos"]):
+        return "ALTO"
+    if any(termo in texto_normalizado for termo in ["ponte", "viaduto", "estrutura", "rachadura", "interdit", "alagamento", "enchente", "deslizamento", "vendaval"]):
+        return "MÉDIO"
+    return "BAIXO"
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -487,6 +567,27 @@ with st.expander("Histórico meteorológico por localidade"):
                 st.error(f"Falha ao carregar histórico: {erro}")
     if "historico_meteorologico" in st.session_state:
         st.dataframe(st.session_state["historico_meteorologico"], hide_index=True, use_container_width=True)
+
+
+st.subheader("Notícias e alertas do DF Agora")
+st.caption("Manchetes e resumos do RSS público, filtrados por termos de risco e referências ao DF. Confirme o conteúdo no artigo original.")
+if st.button("Atualizar notícias do DF Agora"):
+    buscar_noticias_dfagora.clear()
+try:
+    noticias_dfagora = buscar_noticias_dfagora()
+    if not noticias_dfagora:
+        st.info("Nenhuma notícia recente corresponde aos filtros de risco e localidade.")
+    else:
+        st.caption(f"{len(noticias_dfagora)} notícias relevantes encontradas · cache de 5 minutos")
+        for noticia in noticias_dfagora[:10]:
+            with st.container():
+                st.markdown(f"**{html.escape(noticia['titulo'])}**")
+                st.caption(f"Risco preliminar {noticia['risco']} · {noticia['data']} · {noticia['categoria'] or 'DF Agora'}")
+                st.write(noticia["resumo"])
+                st.link_button("Abrir notícia original", noticia["link"])
+                st.markdown("---")
+except Exception as erro:
+    st.warning(f"Não foi possível consultar o feed do DF Agora neste momento: {erro}")
 
 
 # --- Estado inicial ---
